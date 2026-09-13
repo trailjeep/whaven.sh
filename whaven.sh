@@ -167,7 +167,7 @@ subject() { # ensure kws has content (wh mode); convert spaces to '+'
 		picked="$(pick_keyword)"
 		kws="$picked"
 		log INFO "keywords: $kws"
-		notify INFO "keywords: $kws"
+		((quiet)) || notify INFO "keywords: $kws"
 	fi
 	kws="${kws// /+}"
 }
@@ -210,7 +210,7 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 	cp "$WALLPAPER" "$WALLPAPER_ORIG"
 	cur_src="$path"
 	log INFO "Wallpaper: $path"
-	notify INFO "Wallpaper: $path"
+	((quiet)) || notify INFO "Wallpaper: $path"
 }
 
 quote_overlay() { # overlay a fortune quote when -q is given
@@ -281,6 +281,7 @@ file_wall() { # file mode: set a single image once
 	cp "$wallfile" "$WALLPAPER_ORIG"
 	cur_src="$wallfile"
 	log INFO "Wallpaper: $wallfile"
+	((quiet)) || notify INFO "Wallpaper: $wallfile"
 }
 
 save_current() { # SIGRTMAX: copy the live wallpaper into the wallpaper dir
@@ -321,24 +322,27 @@ cycle() { # one wallpaper cycle for non-file modes
 
 sleep_pid=
 want_next=0
-want_new_kw=0
+want_kw=0
 need_save=0
+quiet=0
 
 poke() {
 	[[ -n "$sleep_pid" ]] && kill "$sleep_pid" 2>/dev/null
 	return 0
 }
 
-on_usr1() {
+on_usr1() { # SIGUSR1: fetch next wallpaper, no notify
 	want_next=1
 	poke
 }
-on_usr2() {
-	want_new_kw=1
+on_usr2() { # SIGUSR2: new keywords + next wallpaper; notify only keywords
+	want_kw=1
 	poke
 }
-on_rtmin() { notify INFO "keywords: ${kws:-<dir/pick mode>}"; }
-on_rtmax() {
+on_rtmin() { # SIGRTMIN: report current keywords, never fetch
+	notify INFO "keywords: ${kws:-<dir/pick mode>}"
+}
+on_rtmax() { # SIGRTMAX: save current wallpaper + notify; never change wallpaper
 	need_save=1
 	poke
 }
@@ -447,31 +451,43 @@ if [[ "$mode" == pick ]]; then
 		sleep_pid=$!
 		wait "$sleep_pid"
 		sleep_pid=
-		((need_save)) && {
+		if ((need_save)); then
 			need_save=0
 			save_current
-		}
-		((want_next)) && {
+		elif ((want_next)); then
 			want_next=0
+			quiet=1
 			pick_wall && {
 				quote_overlay
 				set_bg
 			}
-		}
+			quiet=0
+		fi
 	done
 fi
 
 # dir and keyword modes share the same loop
 while :; do
-	((need_save)) && {
+	# deferred actions from traps -- none of these set the wallpaper
+	if ((need_save)); then
 		need_save=0
 		save_current
-	}
-	((want_new_kw)) && {
-		want_new_kw=0
+	elif ((want_kw)); then
+		want_kw=0
 		kws=
-	}
-	cycle
+		subject # notifies the new keywords
+		quiet=1
+		cycle # silent fetch
+		quiet=0
+	elif ((want_next)); then
+		want_next=0
+		quiet=1
+		cycle # silent fetch
+		quiet=0
+	else
+		cycle # normal interval: notifies normally
+	fi
+
 	sleep "$interval" &
 	sleep_pid=$!
 	wait "$sleep_pid"
