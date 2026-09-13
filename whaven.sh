@@ -467,29 +467,43 @@ if [[ "$mode" == pick ]]; then
 fi
 
 # dir and keyword modes share the same loop
+# initial wallpaper immediately, then sleep-then-cycle for autorotation
+case "$mode" in
+dir) dir_wall ;;
+*) dl_wallpaper ;;
+esac
+quote_overlay
+set_bg
 while :; do
-	# deferred actions from traps -- none of these set the wallpaper
+	sleep "$interval" &
+	sleep_pid=$!
+	wait "$sleep_pid"
+	wait_status=$?
+	sleep_pid=
+
+	# A poke (signal) interrupts the sleep, making wait return nonzero.
+	# Then only deferred signal actions run -- never an unsolicited cycle.
 	if ((need_save)); then
 		need_save=0
 		save_current
-	elif ((want_kw)); then
+	fi
+	if ((want_kw)); then
 		want_kw=0
 		kws=
 		subject # notifies the new keywords
 		quiet=1
 		cycle # silent fetch
 		quiet=0
-	elif ((want_next)); then
+	fi
+	if ((want_next)); then
 		want_next=0
 		quiet=1
 		cycle # silent fetch
 		quiet=0
-	else
-		cycle # normal interval: notifies normally
 	fi
 
-	sleep "$interval" &
-	sleep_pid=$!
-	wait "$sleep_pid"
-	sleep_pid=
+	# timer finished normally: set wallpaper (notifies)
+	if ((wait_status == 0)); then
+		cycle
+	fi
 done
