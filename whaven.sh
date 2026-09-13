@@ -18,7 +18,7 @@
 #:
 #: This script Downloads and sets random wallpapers from Wallhaven.cc based on keywords (-k) or a
 #: specified directory (-d) at an specified interval (-i), or a single specified file (-f).
-#: If no options will download and set random wallpaper every 5 minutes from hardcoded keywords.
+#: If no options will download and set random wallpaper every 5 minutes from random hardcoded keywords.
 #: Receipt of SIGUSR1 will restart the timer and retrieve next wallpaper.
 #: Receipt of SIGUSR2 performs SIGUSR1 action with a new set of random hardcoded keywords.
 #: Receipt of SIGRTMIN will notify the keywords being used.
@@ -40,47 +40,46 @@
 #:
 ########################################
 
-
+########################################
 # Shell Sets
 ########################################
 
 #set -x
 #exec &>2 $ Shutup
-set -o pipefail   #### -u #### 
+set -o pipefail   #### -u ####
 
 ########################################
 # Variables
 ########################################
 
+
 TMPDIR="$HOME/.cache/whaven"
-
 PIDFILE="$TMPDIR/whaven.pid"
-
 walldir="$HOME/.local/share/wallpaper"
+wallfile=
 walls=()
-wallpaper="$TMPDIR/wallpaper"
+WALLPAPER="$TMPDIR/wallpaper"
+WALLPAPER_BLURRED="$TMPDIR/wallpaper_blurred"
 
-# Wallhaven API 
+# Wallhaven API
 api="https://wallhaven.cc/api/v1/search?"   # base url
-key=										# personal api key (only needed for NSFW wallpapers)
+key="$(<~/.creds/wallhaven)"				# personal api key (only needed for NSFW wallpapers)
 categories=100                              # 1=on,0=off (general/anime/people)
 purity=111                                  # 1=on,0=off (sfw/sketchy/nsfw)
 ratios=landscape                            # 16x9/16x10/4:3/landscape
 resolutions=1920x1080
+colors=000000
 sorting=random	#views						# date_added, relevance, random, views, favorites, toplist
 
-#API_URL="${api}apikey=${key}&q=${keywords}&categories=${categories}&purity=${purity}&ratios=${ratios}&sorting=${sorting}"
-# "-sS" hide progress bar but show errors
-# --connect-timeout (maximum time that you allow curl's connection to take
-# --max-time 10     (how long each retry will wait)
-# --retry 5         (it will retry 5 times)
-# --retry-delay 0   (make curl sleep this amount of tie before each retry 
-# --retry-max-time  (total time before it's considered failed)
-# To limit  a  single  request's  maximum  time, use -m, --max-time.
-# Set this option to zero to not timeout retries.
-### Consider trimming $API_CURL right away to store as smaller string, might be quicker?
-#API_CURL_TRIMMED="${API_CURL%%thumbs*}" # remove all after thumbs
-
+api_opts=( \
+	apikey=${key}\&\
+	categories=${categories}\&\
+	purity=${purity}\&\
+	atleast=1920x1080\&\
+	ratios=${ratios}\&\
+  colors=${colors}\&\
+	sorting=${sorting}
+)
 
 curl_opts=( \
 	-sS \
@@ -91,12 +90,27 @@ curl_opts=( \
 	--retry-max-time 20 \
 )
 
-swww_opts=( \
-	--transition-bezier .43,1.19,1,.4 \
+awww_opts=( \
+  --all \
+  --outputs HDMI-A-1,HDMI-A-2 \
+	--resize fit \
+	--transition-bezier .54,0,.34,.99 \
 	--transition-fps 60 \
-	--transition-type simple \
-	--transition-duration 5 \
-	--transition-step 4 \
+	--transition-type random \
+	--transition-pos center \
+	--transition-duration 3 \
+	--transition-step 90 \
+)
+
+magick_resize_opts=( \
+	-resize 1920x1080^ \
+	-gravity center \
+	-extent 1920x1080 \
+)
+
+magick_blur_opts=( \
+	-resize 75% \
+	-blur 20x12 \
 )
 
 ########################################
@@ -104,30 +118,52 @@ swww_opts=( \
 ########################################
 
 usage() {
-	msg "$(grep "^#:" "${BASH_SOURCE[0]:-$0}" | sed -e "s/^...//" -e "s/\$script/$script/g" -e "s/#://g")"
+	echo "$(grep "^#:" "${BASH_SOURCE[0]:-$0}" | sed -e "s/^...//" -e "s/\$script/$script/g" -e "s/#://g")"
 }
 
 version() {
 	local vnum="$(grep "^#;" "${BASH_SOURCE[0]:-$0}" | tail -1 | sed -e "s/^..//" | tr -s " " | cut -d" " -f2)"
 	local vdate="$(grep "^#;" "${BASH_SOURCE[0]:-$0}" | tail -1 | sed -e "s/^..//" | tr -s " " | cut -d" " -f3)"
-	msg "$script v$vnum $vdate"
+	echo "$script v$vnum $vdate"
 }
 
 chk_dep() {
 	command -v "$1" &>/dev/null
 }
 
-def_sets() {
-	true
+chk_noctalia() {
+	#qs list --all | grep -q noctalia
+  pgrep --quiet -x noctalia
 }
 
 notify() {
-	notify-send -i /usr/share/icons/Adwaita/16x16/mimetypes/image-x-generic.png "Wallhaven" "${1-}"
+	if ! chk_noctalia; then
+		notify-send \
+			--category="$1" \
+			--urgency=low \
+			--icon=/usr/share/icons/Adwaita/16x16/mimetypes/image-x-generic.png \
+			"Wallhaven" \
+			"${2-}"
+	else
+		#toast='{"type": "notice", "icon": "livewallpaper-indicator", "title": "Whaven", "body": '
+    toast='{"app_name":"Whaven","summary":"Whaven","urgency":"low","icon":"livewallpaper-indicator","body":'
+		json="$toast\"${2}\"}"
+		#qs -c noctalia-shell ipc call toast send "$json"
+    noctalia msg notification-show "$json"
+	fi
+}
+
+datm() {
+	date '+%F %T'
+}
+
+ep_sec() {
+	date '+%s'
 }
 
 msg() {
 	# print non-script output: errs/logs/messages
-	echo >&2 -e "${1-}"
+	printf "[%s] [%s] %s\n" "$(datm)" "${1}" "${2-}" >&2
 }
 
 #rand()( {
@@ -144,24 +180,48 @@ subject() {
 		"husky+huskies" \
 		"wolf+wolves" \
 		"dog+dogs" \
-		"circuits+circuitry+electronics" \
+		"circuit+circuitry" \
+		"electronic+electricity" \
+		"code" \
+		"test+pattern" \
+		"particles" \
+		"audio" \
+		"spectrum" \
+		"cogs+gears" \
+		"mechanism+machinery" \
+		"nightscape" \
+		"id:17952" \
+		"id:344" \
+		"@jrmnt" \
+		"#Fangpeii" \
 		"monochrome+nature" \
 		"map+globe" \
 		"id:81213" \
 		"@waneella" \
 		"@joejazz" \
-		"planets+stars+nebula" \
+		"planets+stars+nebulae" \
 		"@userisro" \
 		"@pc7" \
 		"monochrome+wildlife" \
-		"dystopian" \
+		"national+parks" \
+		"landmark" \
+		"dystopia" \
+		"tolkien" \
+		"nikola+tesla" \
+		"physics+science" \
+		"@CartographerStorm" \
+		"Kvacm" \
+		"escher" \
+		"world+heritage" \
 		"Aenami" \
 	)
+
 	if [ -z "$keywords" ]; then
 		RANDOM=$$$(date +%s)
 		keywords="${words[ $RANDOM % ${#words[@]} ]}"
-		msg "$keywords"
-		notify "$keywords"
+		text="Keywords: $keywords"
+		msg "INFO" "$text"
+		notify "INFO" "$text"
 	fi
 	keywords=$(echo $keywords | tr " " "+" | sed 's/+$//')
 }
@@ -172,7 +232,6 @@ wh_images() {
 		main
 		get_images
 		dl_wallpaper
-		gen_colors
 		gen_blur
 		add_quote
 		set_wallpaper
@@ -189,8 +248,7 @@ dir_images() {
 			shopt -u nullglob
 			RANDOM=$$$(date +%s)
 			wallnum=$(($RANDOM % (${#walls[@]} - 2 + 1) + 0))
-			cp "${walls[$wallnum]}" "$wallpaper"
-			gen_colors
+			cp "${walls[$wallnum]}" "$WALLPAPER"
 			gen_blur
 			add_quote
 			set_wallpaper
@@ -198,24 +256,23 @@ dir_images() {
 			wait $!
 		done
 	else
-		txt="Error: directory not found!"
-		msg "$txt"
-		notify "$txt"
+		text="Directory not found!"
+		msg "ERROR" "$text"
 	fi
 }
 
 file_image() {
 	if [ -f "$wallfile" ]; then
-		cp "$wallfile" "$wallpaper"
+		cp "$wallfile" "$WALLPAPER"
 		add_quote
 		set_wallpaper
-		txt="Wallpaper set to: $wallpaper"
-		msg "$txt"
-		notify "$txt"
+		text="Wallpaper: $WALLPAPER"
+		msg "INFO" "$text"
+		notify "INFO" "$text"
 	else
-		txt="Error: $wallpaper does not exist!"
-		msg "$txt"
-		notify "$txt"
+		text="$WALLPAPER does not exist!"
+		msg "ERROR" "$text"
+		notify "ERROR" "$text"
 		exit 1
 	fi
 }
@@ -226,77 +283,44 @@ picker() {
 		wallfile="$walldir/$wallfile"
 		file_image
 	else
-		txt="Error: $walldir does not exist!"
-		msg "$txt"
-		notify "$txt"
+		text="$walldir does not exist!"
+		msg "ERROR" "$text"
+		notify "ERROR" "$text"
 		exit 1
 	fi
 }
 
 get_images() {
-	API_URL="${api}apikey=${key}&q=${keywords}&categories=${categories}&purity=${purity}&ratios=${ratios}&sorting=${sorting}"
+	API_URL="${api}apikey=${key}&q=${keywords}&categories=${categories}&purity=${purity}&atleast=1920x1080&ratios=${ratios}&sorting=${sorting}"
 	API_CURL=$(curl ${curl_opts[@]} $API_URL)
 	#echo $API_URL
-}
-
-gen_colors() {
-	if $(hash wal); then
-		wal --saturate 1.0 --contrast 1.0 -q -s -t -n -i "$wallpaper"	# -s -t = no term color chg
-		source "$HOME/.cache/wal/colors.sh"			# Load current pywal color scheme (NO CONTROL +u)
-		if [[ $(pgrep waybar) ]]; then
-			$HOME/.config/hypr/scripts/waybar-bg-fg.sh
-			kill -USR2 $(pidof waybar)				# Reload waybar with new colors
-		fi
-		if [[ $(pgrep cava) ]]; then
-			# FIXME - own script?
-			# color="$(grep '\--color2' $HOME/.cache/wal/colors.css | awk '{print $2}' | tr -d ';')"
-			colors=(rosewater flamingo pink mauve maroon peach yellow teal sky sapphire blue lavender text)
-			RANDOM=$$$(date +%s)
-			color="$(echo ${colors[RANDOM%${#colors[@]}]})"
-			hex="$(grep "@define-color $color" $HOME/.config/hypr/theme_colors.css | awk '{print $3}' | tr -d ';')"
-			#hex="$(grep '\--color2' .cache/wal/colors.css | awk '{print $2}' | tr -d ';')"
-			sed -i "/foreground/c\foreground = '$hex'" ~/.config/cava/config
-			kill -USR2 $(pidof cava)	            #HOME/.cache/wal/colors.sh Reload waybar with new colors
-		fi
-		#if $(hash wlogout); then
-		#	$HOME/.config/hypr/scripts/wlogout-colors.sh
-		#fi
-	fi
 }
 
 gen_blur() {
 	blurred="$TMPDIR/blurred_wallpaper.png"
 	blur="20x12"
-	magick "$wallpaper" -resize 75% "$blurred"
+	magick "$WALLPAPER" -resize 75% "$blurred"
 	if [ "$blur" != "0x0" ]; then
 		magick "$blurred" -blur "$blur" "$blurred"
 	fi
 }
 
 resize_wall() {
-	# <https://imagemagick.org/Usage/resize/#resize>
-	#imgw=identify -ping -format '%w' "$wallpaper"
-	#imgh=identify -ping -format '%h' "$wallpaper"
-	magick \
-		"$wallpaper" \
-		-resize 1920x1080^ \
-		-gravity center \
-		-extent 1920x1080 \
-		"$wallpaper"
+	magick "$WALLPAPER" "${magick_resize_opts[@]}" "$WALLPAPER"
 }
 
 add_quote() {
 	if [ "$quots" -eq 1 ]; then
 		# <https://github.com/Cybersnake223/Hypr/blob/main/.local/bin/scripts/changewall>
 		cols=60
-		font=/usr/share/fonts/OTF/FiraMonoNerdFont-Medium.otf
+		font=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
 		font_size=32
 		font_color=lightgray
 		shad_color=black
 		quote=$(fortune -e ~/.local/share/fortune/my-collected-quotes | fold -s -w $cols | sed 's/--/—/')
 		resize_wall
 		magick \
-			"$wallpaper" \
+			"$WALLPAPER" \
 			-gravity North \
 			-font "$font" \
 			-pointsize "$font_size" \
@@ -304,39 +328,31 @@ add_quote() {
 			-annotate +0+100 "$quote" \
 			-fill "$font_color" \
 			-annotate +2+102 "$quote" \
-			"$wallpaper"
+			"$WALLPAPER"
 	else
 		return
 	fi
 }
 
+awww_set() {
+	awww img "$WALLPAPER" "${awww_opts[@]}"
+}
+
+noctalia_set() {
+	epoch="$(ep_sec)"
+	cp "$WALLPAPER" "$TMPDIR/wallpaper_$epoch"
+	#qs -c noctalia-shell ipc call wallpaper set $TMPDIR/wallpaper_$epoch all
+  noctalia msg wallpaper-set $TMPDIR/wallpaper_$epoch
+	sleep 1
+	rm "$TMPDIR/wallpaper_$epoch"
+}
+
 set_wallpaper() {
-	if $(hash swww); then
-		swww img $wallpaper "${swww_opts[@]}"
-	elif $(hash hyprpaper); then
-		cat <<- _EOF_ >$HOME/.config/hypr/hyprpaper.conf
-			preload = $wallpaper
-			wallpaper=HDMI-A-1,$wallpaper
-			wallpaper=HDMI-A-2,$wallpaper
-		_EOF_
-		if pidof -q hyprpaper; then
-			killall hyprpaper
-		fi
-		hyprpaper --config $HOME/.config/hypr/hyprpaper.conf &
-	elif hash sway &> /dev/null; then
-		feh --bg-fill "$wallpaper";
-	elif hash gsettings &> /dev/null; then
-		WHICH_MODE=$(gsettings get org.gnome.desktop.interface color-scheme)
-		if [[ "$WHICH_MODE" == "'prefer-dark'" ]]; then
-			gsettings reset org.gnome.desktop.background picture-uri-dark
-			gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper"
-		elif [[ "$WHICH_MODE" == "'default'" ]]; then
-			gsettings reset org.gnome.desktop.background picture-uri
-			gsettings set org.gnome.desktop.background picture-uri "$wallpaper"
-		fi
-	else
-		echo "No wallpaper utility was found!!!"
-		exit 1
+	if chk_dep awww; then
+		awww_set
+	fi
+	if chk_noctalia; then
+		noctalia_set
 	fi
 }
 
@@ -354,30 +370,35 @@ main() {
 					entry=$(($RANDOM % ($entries - 2 + 1) + 0))
 					IMAGE_URL=$(echo "$API_CURL" | jq -r "[.data[] | .path] | .[$entry]")
 					FILE="$(echo ${IMAGE_URL##*/})"
-					curl -sS --max-time 10 --retry 2 --retry-delay 3 --retry-max-time 20 "$IMAGE_URL" -o "$wallpaper" #"$HOME/.cache/wallpaper.${IMAGE_URL##*.}"
-					cp "$wallpaper" "$wallpaper.ORG"
+					text="Wallpaper: $IMAGE_URL"
+					msg "INFO" "$text"
+					curl -sS --max-time 10 --retry 2 --retry-delay 3 --retry-max-time 20 "$IMAGE_URL" -o "$WALLPAPER" #"$HOME/.cache/wallpaper.${IMAGE_URL##*.}"
+					cp "$WALLPAPER" "$WALLPAPER.ORG"
 				}
 			else
 				dl_wallpaper() {
 					trim="${API_CURL##*path}"
-					echo "$trim" | cut -c 4-59 | xargs curl -sS --max-time 10 --retry 2 --retry-delay 3 --retry-max-time 20 -o "$wallpaper" #"$HOME/.cache/wallpaper.${IMAGE_URL##*.}"
+					echo "$trim" | cut -c 4-59 | xargs curl -sS --max-time 10 --retry 2 --retry-delay 3 --retry-max-time 20 -o "$WALLPAPER" #"$HOME/.cache/wallpaper.${IMAGE_URL##*.}"
 				}
 			fi
 		else
 			# if $API_CURL does not return at least one full path url
-			txt="Error: No results - using hardcoded keyword set!"
-			msg "$txt"
-			notify "$txt"
+			text="No results - Fetching new keywords!"
+			msg "ERROR" "$text"
+			notify "ERROR" "$text"
 			keywords=
 			wh_images
 		fi
 	else
-		txt="Curl failed"
-		msg "$txt"
-		exit 1	# if get_images EXIT_CODE is non-zero, then exit
+		text="Wallhaven API failure: retry in $interval seconds."
+		msg "ERROR" "$text"
+		notify "ERROR" "$text"
+		sleep "$interval" &
+		wait $!
 	fi
 }
 
+# next wallpaper
 handle_usr1() {
 	if [ "$mode" == "dir" ]; then
 		dir_images
@@ -388,6 +409,7 @@ handle_usr1() {
 	fi
 }
 
+# new keywords
 handle_usr2() {
 	if [ "$mode" == "dir" ]; then
 		dir_images
@@ -397,16 +419,26 @@ handle_usr2() {
 	fi
 }
 
+# notify current keywords
 handle_rtmin() {
-	notify "$keywords"
+	if [ "$mode" == "dir" ] || [ "$mode" == "pick" ]; then
+		notify "ERROR" "Keywords not applicable in $mode mode."
+	else
+		notify "INFO" "Keywords: $keywords"
+	fi
+	sleep "$interval" &
+	wait $!
 }
 
+# save current wallpaper
 handle_rtmax() {
 	if ! [ -d "$walldir" ]; then
 		mkdir "$walldir"
 	fi
-	cp "$wallpaper.ORG" "$walldir/$FILE"
-	notify "Wallpaper: $FILE saved!"
+	cp "$WALLPAPER.ORG" "$walldir/$FILE"
+	notify "INFO" "Wallpaper: $FILE saved!"
+	sleep "$interval" &
+	wait $!
 }
 
 ########################################
@@ -429,15 +461,13 @@ trap handle_usr2 SIGUSR2
 trap handle_rtmin SIGRTMIN
 trap handle_rtmax SIGRTMAX
 
-# def_sets
-# def vars
-
 script="$(basename "${BASH_SOURCE[0]:-$0}")"
 
 deps=( curl magick jq )
 for dep in "${deps[@]}"; do
 	if ! chk_dep "$dep"; then
-		msg "Error: $script depends on $dep"
+		text="$script depends on $dep"
+		msg "ERROR" "$text"
 		exit 1
 	fi
 done
@@ -479,7 +509,7 @@ while getopts ":huva:d:f:i:k:qp:" option; do
 				;;
 		q )		quots=1
 				;;
-		* )		msg "Error: invalid option \"-$OPTARG\"!"
+		* )		msg "ERROR" "Invalid option \"-$OPTARG\"!"
 				usage
 				exit 1
 				;;
