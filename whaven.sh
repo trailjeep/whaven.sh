@@ -159,16 +159,15 @@ make_url() { # print the wallhaven search URL for the current state
 image_brightness() { # 0-100 "darkness score" of $WALLPAPER; prints measured values
 	# mean - 0.5*stdev: high-contrast images (bright sky + dark ground) score
 	# darker than flat gray at the same mean -- closer to perceived darkness.
-	# Uses ImageMagick built-in fx escapes (one info: call, no 1x1 resize).
-	# NOTE: IM's quantumrange is 255 (Q8) or 65535 (Q16); normalize to 0-100.
-	local mean stdev qr score
+	# IM fx properties mean/standard_deviation are ALREADY normalized 0-1;
+	# score = (mean - 0.5*stdev) * 100. Do NOT divide by quantumrange again.
+	local mean stdev score
 	mean="$(magick "$WALLPAPER" -format '%[fx:mean]' info: 2>/dev/null)" || return 1
 	stdev="$(magick "$WALLPAPER" -format '%[fx:standard_deviation]' info: 2>/dev/null)" || return 1
-	qr="$(magick "$WALLPAPER" -format '%[fx:quantumrange]' info: 2>/dev/null)" || return 1
-	[[ -n "$mean" && -n "$stdev" && -n "$qr" ]] || return 1
-	score="$(awk -v m="$mean" -v s="$stdev" -v q="$qr" 'BEGIN { x = (m - 0.5*s) / q * 100; if (x < 0) x = 0; if (x > 100) x = 100; printf "%.0f", x }')"
+	[[ -n "$mean" && -n "$stdev" ]] || return 1
+	score="$(awk -v m="$mean" -v s="$stdev" 'BEGIN { x = (m - 0.5*s)*100; if (x < 0) x = 0; if (x > 100) x = 100; printf "%.0f", x }')"
 	# always surface the measured values on the terminal (stderr) for judging
-	printf '[brightness] mean=%.0f stdev=%.0f score=%s\n' "$mean" "$stdev" "$score" >&2
+	printf '[brightness] mean=%.2f stdev=%.2f score=%s\n' "$mean" "$stdev" "$score" >&2
 	printf '%s' "$score"
 }
 
