@@ -22,8 +22,12 @@ with poke-able signal handlers.
 | `-i` | interval seconds, min 60 (default 300) |
 | `-p` | pick from a directory with rofi |
 | `-q` | overlay a fortune quote |
+| `-t` | theme filter: `dark` (default) or `light`; refetches mismatched wallpapers |
 
 Default run: random wallpaper every 5 minutes from built-in keywords.
+
+`-t` samples the average brightness of each fetched image (ImageMagick 1x1
+average) and refetches (up to 4 attempts) until it matches the chosen theme.
 
 Signals: `SIGUSR1` next wallpaper, `SIGUSR2` new keywords + wall,
 `SIGRTMIN` show keywords, `SIGRTMAX` save current, `SIGHUP` = SIGUSR1.
