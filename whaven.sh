@@ -80,7 +80,7 @@ mode=        # '' | wh | dir | file | pick
 kws=         # accumulated search keywords (wh mode)
 quots=0
 theme=dark # dark | light -- enforced for fetched wallpapers (wh mode)
-theme_retries=4
+theme_retries=5
 quote_font=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
 
 curl_opts=(-sS --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 3 --retry-max-time 20)
@@ -241,16 +241,19 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 }
 
 fetch_themed() { # dl_wallpaper + retry-on-theme-mismatch (wh mode only)
-	local tries
+	local tries rc
 	for ((tries = 1; tries <= theme_retries; tries++)); do
 		dl_wallpaper && return 0
-		local rc=$?
+		rc=$?
 		((rc == 2)) || return "$rc" # non-theme failure: report as-is
 		((tries < theme_retries)) && sleep 2
 	done
-	err "Could not find a $theme wallpaper after ${theme_retries} attempts"
-	notify ERROR "No ${theme} wallpaper found"
-	return 1
+	# no luck after N attempts: rotate keywords (same as SIGUSR2) and try again
+	log INFO "theme $theme not found in ${theme_retries} attempts; rotating keywords"
+	notify INFO "No ${theme} wallpaper found; rotating keywords"
+	kws=
+	subject # picks + notifies the new keywords
+	dl_wallpaper
 }
 
 quote_overlay() { # overlay a fortune quote when -q is given

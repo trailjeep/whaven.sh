@@ -27,7 +27,9 @@ with poke-able signal handlers.
 Default run: random wallpaper every 5 minutes from built-in keywords.
 
 `-t` samples the average brightness of each fetched image (ImageMagick 1x1
-average) and refetches (up to 4 attempts) until it matches the chosen theme.
+average) and refetches (up to 5 attempts) until it matches the
+chosen theme; if none match, it rotates to fresh keywords (like SIGUSR2) and
+tries again.
 
 Signals: `SIGUSR1` next wallpaper, `SIGUSR2` new keywords + wall,
 `SIGRTMIN` show keywords, `SIGRTMAX` save current, `SIGHUP` = SIGUSR1.
