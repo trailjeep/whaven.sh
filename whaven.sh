@@ -156,21 +156,26 @@ make_url() { # print the wallhaven search URL for the current state
 	printf '%s' "$url"
 }
 
-image_brightness() { # 0-100 average brightness of $WALLPAPER (Imagemagick 1x1 avg)
-	local raw
-	raw="$(magick "$WALLPAPER" -colorspace gray -resize 1x1 txt:- 2>/dev/null)" || return 1
-	# line like: 0,0: (117,117,117)  #757575  gray(117)
-	raw="$(grep -o 'gray([0-9]*)' <<<"$raw" | head -1 | tr -dc '0-9')"
-	[[ -n "$raw" ]] || return 1
-	printf '%s' "$((raw))"
+image_brightness() { # 0-100 "darkness score" of $WALLPAPER; prints measured values
+	# mean - 0.5*stdev: high-contrast images (bright sky + dark ground) score
+	# darker than flat gray at the same mean -- closer to perceived darkness.
+	# Uses ImageMagick built-in fx escapes (one info: call, no 1x1 resize).
+	local mean stdev score
+	mean="$(magick "$WALLPAPER" -format '%[fx:quantumrange*mean]' info: 2>/dev/null)" || return 1
+	stdev="$(magick "$WALLPAPER" -format '%[fx:quantumrange*standard_deviation]' info: 2>/dev/null)" || return 1
+	[[ -n "$mean" && -n "$stdev" ]] || return 1
+	score="$(awk -v m="$mean" -v s="$stdev" 'BEGIN { x = m - 0.5*s; if (x < 0) x = 0; if (x > 100) x = 100; printf "%.0f", x }')"
+	# always surface the measured values on the terminal (stderr) for judging
+	printf '[brightness] mean=%.0f stdev=%.0f score=%s\n' "$mean" "$stdev" "$score" >&2
+	printf '%s' "$score"
 }
 
-theme_ok() { # $1=brightness(0-100); true when it matches $theme
+theme_ok() { # $1=score(0-100); true when it matches $theme
 	local b="$1"
 	if [[ "$theme" == light ]]; then
-		((b >= 50))
+		((b >= 65))
 	else
-		((b <= 50))
+		((b < 35))
 	fi
 }
 
