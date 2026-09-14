@@ -23,7 +23,7 @@
 #:   SIGRTMAX  save the current wallpaper into the wallpaper directory
 #:   SIGHUP    same as SIGUSR1
 #:
-#: Usage: $script [-h] [-u] [-v] [-a] [-d] [-f] [-i] [-k] [-p] [-q]
+#: Usage: $script [-h] [-u] [-v] [-a] [-d] [-f] [-i] [-k] [-p] [-q] [-t THEME]
 #:
 #: Options:
 #:   -h, -u  show help and exit
@@ -36,6 +36,8 @@
 #:   -i      interval in seconds (min 60, default 300)
 #:   -p      pick a wallpaper from a directory via rofi
 #:   -q      overlay a fortune quote on the wallpaper
+#:   -t      theme filter for fetched wallpapers: dark (default) or light;
+#:           wallpapers whose average brightness mismatches are refetched
 #:
 #: Environment:
 #:   WHAVEN_API_KEY        personal API key (overrides cred file)
@@ -77,6 +79,8 @@ interval=300 # seconds between wallpapers (min 60)
 mode=        # '' | wh | dir | file | pick
 kws=         # accumulated search keywords (wh mode)
 quots=0
+theme=dark # dark | light -- enforced for fetched wallpapers (wh mode)
+theme_retries=5
 quote_font=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
 
 curl_opts=(-sS --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 3 --retry-max-time 20)
@@ -152,6 +156,30 @@ make_url() { # print the wallhaven search URL for the current state
 	printf '%s' "$url"
 }
 
+image_brightness() { # 0-100 "darkness score" of $WALLPAPER; prints measured values
+	# mean - 0.5*stdev: high-contrast images (bright sky + dark ground) score
+	# darker than flat gray at the same mean -- closer to perceived darkness.
+	# IM fx properties mean/standard_deviation are ALREADY normalized 0-1;
+	# score = (mean - 0.5*stdev) * 100. Do NOT divide by quantumrange again.
+	local mean stdev score
+	mean="$(magick "$WALLPAPER" -format '%[fx:mean]' info: 2>/dev/null)" || return 1
+	stdev="$(magick "$WALLPAPER" -format '%[fx:standard_deviation]' info: 2>/dev/null)" || return 1
+	[[ -n "$mean" && -n "$stdev" ]] || return 1
+	score="$(awk -v m="$mean" -v s="$stdev" 'BEGIN { x = (m - 0.5*s)*100; if (x < 0) x = 0; if (x > 100) x = 100; printf "%.0f", x }')"
+	# always surface the measured values on the terminal (stderr) for judging
+	printf '[brightness] mean=%.2f stdev=%.2f score=%s\n' "$mean" "$stdev" "$score" >&2
+	printf '%s' "$score"
+}
+
+theme_ok() { # $1=score(0-100); true when it matches $theme
+	local b="$1"
+	if [[ "$theme" == light ]]; then
+		((b >= 65))
+	else
+		((b < 35))
+	fi
+}
+
 ########################################
 # Wallpaper acquisition
 ########################################
@@ -207,10 +235,31 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 		err "Empty download"
 		return 1
 	}
+	# theme enforcement: refetch if the sampled brightness mismatches
+	if ! theme_ok "$(image_brightness)"; then
+		err "Theme mismatch ($theme): refetching"
+		return 2 # dl_wallpaper retry sentinel
+	fi
 	cp "$WALLPAPER" "$WALLPAPER_ORIG"
 	cur_src="$path"
 	log INFO "Wallpaper: $path"
 	((quiet)) || notify INFO "Wallpaper: $path"
+}
+
+fetch_themed() { # dl_wallpaper + retry-on-theme-mismatch (wh mode only)
+	local tries rc
+	for ((tries = 1; tries <= theme_retries; tries++)); do
+		dl_wallpaper && return 0
+		rc=$?
+		((rc == 2)) || return "$rc" # non-theme failure: report as-is
+		((tries < theme_retries)) && sleep 2
+	done
+	# no luck after N attempts: rotate keywords (same as SIGUSR2) and try again
+	log INFO "theme $theme not found in ${theme_retries} attempts; rotating keywords"
+	notify INFO "No ${theme} wallpaper found; rotating keywords"
+	kws=
+	subject # picks + notifies the new keywords
+	dl_wallpaper
 }
 
 quote_overlay() { # overlay a fortune quote when -q is given
@@ -310,7 +359,7 @@ cycle() { # one wallpaper cycle for non-file modes
 	case "$mode" in
 	dir) dir_wall ;;
 	pick) pick_wall ;;
-	*) dl_wallpaper ;;
+	*) fetch_themed ;;
 	esac
 	quote_overlay
 	set_bg
@@ -389,7 +438,7 @@ fi
 printf '%s\n' "$$" >"$PIDFILE"
 
 OPTERR=0
-while getopts ":huva:d:f:i:k:qp:" option; do
+while getopts ":huva:d:f:i:k:qp:t:" option; do
 	case "$option" in
 	h | u)
 		usage
@@ -416,6 +465,13 @@ while getopts ":huva:d:f:i:k:qp:" option; do
 	p)
 		mode=pick
 		WALLDIR="$OPTARG"
+		;;
+	t)
+		theme="$OPTARG"
+		[[ "$theme" == dark || "$theme" == light ]] || {
+			err "Invalid theme -t: $theme (expected dark|light)"
+			exit 1
+		}
 		;;
 	q) quots=1 ;;
 	?)
@@ -470,7 +526,7 @@ fi
 # initial wallpaper immediately, then sleep-then-cycle for autorotation
 case "$mode" in
 dir) dir_wall ;;
-*) dl_wallpaper ;;
+*) fetch_themed ;;
 esac
 quote_overlay
 set_bg

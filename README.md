@@ -22,8 +22,22 @@ with poke-able signal handlers.
 | `-i` | interval seconds, min 60 (default 300) |
 | `-p` | pick from a directory with rofi |
 | `-q` | overlay a fortune quote |
+| `-t` | theme filter: `dark` (default) or `light`; refetches mismatched wallpapers |
 
 Default run: random wallpaper every 5 minutes from built-in keywords.
+
+`-t` samples each fetched image with ImageMagick built-in statistics:
+`mean` and `standard_deviation` from one `info:` call, combined into a
+darkness score of `mean - 0.5*stdev` (0-100). High-contrast images (bright
+sky + dark ground) score darker than flat gray at the same mean, which is
+closer to how the eye judges a wallpaper. Measured values are printed to the
+terminal on every fetch:
+
+    [brightness] mean=42 stdev=38 score=23
+
+Thresholds: `dark` accepts score < 35, `light` accepts score >= 65. Mismatched
+wallpapers are refetched (up to 5 attempts); if none match, keywords rotate
+(like SIGUSR2) and it tries again.
 
 Signals: `SIGUSR1` next wallpaper, `SIGUSR2` new keywords + wall,
 `SIGRTMIN` show keywords, `SIGRTMAX` save current, `SIGHUP` = SIGUSR1.
