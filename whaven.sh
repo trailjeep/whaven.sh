@@ -81,7 +81,8 @@ kws=         # accumulated search keywords (wh mode)
 quots=0
 theme=dark # dark | light -- enforced for fetched wallpapers (wh mode)
 theme_retries=5
-quote_font=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
+quote_font="$HOME/.local/share/fonts/TTF/Fuzzy_Bubbles/FuzzyBubbles-Bold.ttf"
+quote_font_fallback=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
 
 curl_opts=(-sS --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 3 --retry-max-time 20)
 
@@ -270,7 +271,12 @@ quote_overlay() { # overlay a fortune quote when -q is given
 	quote="$(fortune -e "$HOME/.local/share/fortune/my-collected-quotes" 2>/dev/null |
 		fold -s -w 60 | sed 's/--/—/')" || true
 	[[ -z "$quote" ]] && return 0
-	[[ -f "$quote_font" ]] && font_arg=(-font "$quote_font")
+	# preferred font, then fallback; skip -font entirely if neither exists (IM default)
+	if [[ -f "$quote_font" ]]; then
+		font_arg=(-font "$quote_font")
+	elif [[ -f "$quote_font_fallback" ]]; then
+		font_arg=(-font "$quote_font_fallback")
+	fi
 	# crop-resize to the target geometry, then draw shadowed text
 	magick "$WALLPAPER" -resize 1920x1080^ "${magick_extend_opts[@]}" "$WALLPAPER"
 	magick "$WALLPAPER" "${font_arg[@]}" \
