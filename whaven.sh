@@ -1,537 +1,509 @@
 #!/usr/bin/env bash
+# whaven.sh -- randomized wallpapers from wallhaven.cc
 #
-########################################
-# Dependencies:
-#	curl
-#	imagemagick
-#	jq
-########################################
-# References:
-#	<https://github.com/jpatzy/whaven>
-########################################
+# Dependencies: curl, imagemagick (magick), jq
+#   rofi  (only for -p),  fortune (only for -q)
+# References: <https://github.com/jpatzy/whaven>
+#
 #; Changes:
-#; Ver  Date        Author  Comment
-#; 1.0	2024-06-24	JJS		Initial Release
-#; 1.1	2024-06-25	JJS		Feature Complete
-#; 1.2	2024-10-05	JJS		+SIGHUP
-########################################
+#; 1.0  2024-06-24  JJS  Initial Release
+#; 1.1  2024-06-25  JJS  Feature Complete
+#; 1.2  2024-10-05  JJS  +SIGHUP
+#; 1.3  2026-09-13  HMB  Refactor: shellcheck-clean, single event loop
+#
+#: Downloads and sets random wallpapers from wallhaven.cc based on keywords
+#: (-k), a directory (-d), a rofi picker (-p), or sets a single file (-f),
+#: at a chosen interval (-i). With no options it fetches a random wallpaper
+#: every 5 minutes using randomized built-in keywords.
 #:
-#: This script Downloads and sets random wallpapers from Wallhaven.cc based on keywords (-k) or a
-#: specified directory (-d) at an specified interval (-i), or a single specified file (-f).
-#: If no options will download and set random wallpaper every 5 minutes from random hardcoded keywords.
-#: Receipt of SIGUSR1 will restart the timer and retrieve next wallpaper.
-#: Receipt of SIGUSR2 performs SIGUSR1 action with a new set of random hardcoded keywords.
-#: Receipt of SIGRTMIN will notify the keywords being used.
-#: Receipt of SIGRTMAX will save the current wallpaper.
+#: Signals:
+#:   SIGUSR1   fetch the next wallpaper immediately
+#:   SIGUSR2   fetch the next wallpaper with fresh keywords
+#:   SIGRTMIN  show the keywords currently in use
+#:   SIGRTMAX  save the current wallpaper into the wallpaper directory
+#:   SIGHUP    same as SIGUSR1
 #:
 #: Usage: $script [-h] [-u] [-v] [-a] [-d] [-f] [-i] [-k] [-p] [-q]
 #:
 #: Options:
-#:	-h, -u	display help/usage and exit
-#:	-v		display version and exit
-#:	-a		personal api key (additionally retrieve NSFW images)
-#:	-d		input directory (exclusive to -f, -k)
-#:	-f		input file (exclusive to -d, -k)
-#:	-k		wallhaven.cc keyword(s) or @user(s)
-#:			multiples -k kwd1 -k kwd2 or -k kwd1+kwd2 or -k "kwd1 kwd2"
-#:	-i		change interval in seconds
-#:	-p		pick wallpaper from provided directory
-#:	-q		add quotations to wallpaper
+#:   -h, -u  show help and exit
+#:   -v      show version and exit
+#:   -a      personal API key (required for NSFW images)
+#:   -d      input directory (exclusive with -f, -k, -p)
+#:   -f      input file (exclusive with -d, -k, -p)
+#:   -k      wallhaven.cc keyword(s) or @user(s); may be repeated
+#:           (-k a -k b), space-separated (-k "a b"), or joined (-k a+b)
+#:   -i      interval in seconds (min 60, default 300)
+#:   -p      pick a wallpaper from a directory via rofi
+#:   -q      overlay a fortune quote on the wallpaper
 #:
+#: Environment:
+#:   WHAVEN_API_KEY        personal API key (overrides cred file)
+#:   WHAVEN_CRED_FILE      key file        (default ~/.creds/wallhaven)
+#:   WHAVEN_CACHE_DIR      cache dir       (default ~/.cache/whaven)
+#:   WHAVEN_WALLPAPER_DIR  saved-wallpaper dir (default ~/.local/share/wallpaper)
+#
 ########################################
 
-########################################
-# Shell Sets
-########################################
-
-#set -x
-#exec &>2 $ Shutup
-set -o pipefail   #### -u ####
+set -o pipefail
 
 ########################################
-# Variables
+# Configuration
 ########################################
 
+# API key: -a flag beats env, env beats ~/.creds/wallhaven (legacy)
+WHAVEN_API_KEY="${WHAVEN_API_KEY:-}"
+cred_file="${WHAVEN_CRED_FILE:-$HOME/.creds/wallhaven}"
+if [[ -z "$WHAVEN_API_KEY" ]] && [[ -r "$cred_file" ]]; then
+	read -r WHAVEN_API_KEY <"$cred_file"
+fi
 
-TMPDIR="$HOME/.cache/whaven"
-PIDFILE="$TMPDIR/whaven.pid"
-walldir="$HOME/.local/share/wallpaper"
-wallfile=
-walls=()
-WALLPAPER="$TMPDIR/wallpaper"
-WALLPAPER_BLURRED="$TMPDIR/wallpaper_blurred"
+# Paths (XDG-aware, individually overridable)
+TMP="${WHAVEN_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/whaven}"
+WALLDIR="${WHAVEN_WALLPAPER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/wallpaper}"
+WALLPAPER="$TMP/wallpaper"
+WALLPAPER_ORIG="$TMP/wallpaper.orig"
+PIDFILE="$TMP/whaven.pid"
 
 # Wallhaven API
-api="https://wallhaven.cc/api/v1/search?"   # base url
-key="$(<~/.creds/wallhaven)"				# personal api key (only needed for NSFW wallpapers)
-categories=100                              # 1=on,0=off (general/anime/people)
-purity=111                                  # 1=on,0=off (sfw/sketchy/nsfw)
-ratios=landscape                            # 16x9/16x10/4:3/landscape
-resolutions=1920x1080
-colors=000000
-sorting=random	#views						# date_added, relevance, random, views, favorites, toplist
+API="https://wallhaven.cc/api/v1/search"
+categories=100 # general=1 anime=2 people=4 -> 100 = general only
+purity=111     # sfw=1 sketchy=2 nsfw=4 -> 111 = all three
+atleast=1920x1080
+ratios=landscape # landscape | 16x9 | 16x10 | 4:3
+sorting=random   # date_added | relevance | random | views | favorites | toplist
 
-api_opts=( \
-	apikey=${key}\&\
-	categories=${categories}\&\
-	purity=${purity}\&\
-	atleast=1920x1080\&\
-	ratios=${ratios}\&\
-  colors=${colors}\&\
-	sorting=${sorting}
+interval=300 # seconds between wallpapers (min 60)
+mode=        # '' | wh | dir | file | pick
+kws=         # accumulated search keywords (wh mode)
+quots=0
+quote_font=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
+
+curl_opts=(-sS --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 3 --retry-max-time 20)
+
+magick_extend_opts=(-background "#000000" -gravity center -extent 1920x1080)
+
+awww_opts=(
+	--all
+	--outputs "HDMI-A-1,HDMI-A-2"
+	--resize fit
+	--transition-bezier ".54,0,.34,.99"
+	--transition-fps 60
+	--transition-type random
+	--transition-pos center
+	--transition-duration 3
+	--transition-step 90
 )
 
-curl_opts=( \
-	-sS \
-	--connect-timeout 5 \
-	--max-time 10 \
-	--retry 3 \
-	--retry-delay 3 \
-	--retry-max-time 20 \
-)
-
-awww_opts=( \
-  --all \
-  --outputs HDMI-A-1,HDMI-A-2 \
-	--resize fit \
-	--transition-bezier .54,0,.34,.99 \
-	--transition-fps 60 \
-	--transition-type random \
-	--transition-pos center \
-	--transition-duration 3 \
-	--transition-step 90 \
-)
-
-magick_resize_opts=( \
-	-resize 1920x1080^ \
-	-gravity center \
-	-extent 1920x1080 \
-)
-
-magick_blur_opts=( \
-	-resize 75% \
-	-blur 20x12 \
+# Substitution keywords used when none are given with -k
+words=(
+	"tech+technology" "vintage+tech" "german+shepherd" "husky+huskies"
+	"wolf+wolves" "dog+dogs" "circuit+circuitry" "electronic+electricity"
+	"code" "test+pattern" "particles" "audio" "spectrum" "cogs+gears"
+	"mechanism+machinery" "nightscape" "id:17952" "id:344" "@jrmnt"
+	"#Fangpeii" "monochrome+nature" "map+globe" "id:81213" "@waneella"
+	"@joejazz" "planets+stars+nebulae" "@userisro" "@pc7"
+	"monochrome+wildlife" "national+parks" "landmark" "dystopia" "tolkien"
+	"nikola+tesla" "physics+science" "@CartographerStorm" "Kvacm" "escher"
+	"world+heritage" "Aenami"
 )
 
 ########################################
-# Functions
+# Helpers
 ########################################
+
+now() { date '+%F %T'; }
+
+log() { printf '[%s] [%s] %s\n' "$(now)" "$1" "${2:-}" >&2; }
+err() { log ERROR "$*"; }
+
+chk_dep() { command -v "$1" >/dev/null 2>&1; }
+chk_noct() { pgrep -x noctalia >/dev/null 2>&1; }
+
+notify() { # level message -> noctalia daemon if running, else notify-send
+	local level="$1" msg="${2:-}"
+	if chk_noct; then
+		local json
+		json="$(jq -nc --arg body "$msg" \
+			'{app_name:"Whaven", summary:"Whaven", urgency:"low", icon:"livewallpaper-indicator", body:$body}')"
+		noctalia msg notification-show "$json"
+	else
+		notify-send --category="$level" --urgency=low "Whaven" "$msg"
+	fi
+}
 
 usage() {
-	echo "$(grep "^#:" "${BASH_SOURCE[0]:-$0}" | sed -e "s/^...//" -e "s/\$script/$script/g" -e "s/#://g")"
+	grep '^#:' "${BASH_SOURCE[0]:-$0}" | sed -e 's/^#: *//' -e "s/\$script/$(basename "${BASH_SOURCE[0]:-$0}")/g"
 }
 
 version() {
-	local vnum="$(grep "^#;" "${BASH_SOURCE[0]:-$0}" | tail -1 | sed -e "s/^..//" | tr -s " " | cut -d" " -f2)"
-	local vdate="$(grep "^#;" "${BASH_SOURCE[0]:-$0}" | tail -1 | sed -e "s/^..//" | tr -s " " | cut -d" " -f3)"
-	echo "$script v$vnum $vdate"
+	local line ver date
+	line="$(grep '^#;' "${BASH_SOURCE[0]:-$0}" | tail -1 | sed 's/^#; *//')"
+	ver="$(awk '{print $1}' <<<"$line")"
+	date="$(awk '{print $2}' <<<"$line")"
+	echo "$(basename "${BASH_SOURCE[0]:-$0}") v$ver $date"
 }
 
-chk_dep() {
-	command -v "$1" &>/dev/null
+make_url() { # print the wallhaven search URL for the current state
+	local url="$API?categories=${categories}&purity=${purity}&atleast=${atleast}"
+	url+="&ratios=${ratios}&sorting=${sorting}"
+	[[ -n "$kws" ]] && url+="&q=${kws}"
+	[[ -n "$WHAVEN_API_KEY" ]] && url+="&apikey=${WHAVEN_API_KEY}"
+	printf '%s' "$url"
 }
 
-chk_noctalia() {
-	#qs list --all | grep -q noctalia
-  pgrep --quiet -x noctalia
+########################################
+# Wallpaper acquisition
+########################################
+
+pick_keyword() { # print one random substitution keyword
+	local count="${#words[@]}"
+	printf '%s\n' "${words[$((RANDOM % count))]}"
 }
 
-notify() {
-	if ! chk_noctalia; then
-		notify-send \
-			--category="$1" \
-			--urgency=low \
-			--icon=/usr/share/icons/Adwaita/16x16/mimetypes/image-x-generic.png \
-			"Wallhaven" \
-			"${2-}"
-	else
-		#toast='{"type": "notice", "icon": "livewallpaper-indicator", "title": "Whaven", "body": '
-    toast='{"app_name":"Whaven","summary":"Whaven","urgency":"low","icon":"livewallpaper-indicator","body":'
-		json="$toast\"${2}\"}"
-		#qs -c noctalia-shell ipc call toast send "$json"
-    noctalia msg notification-show "$json"
+subject() { # ensure kws has content (wh mode); convert spaces to '+'
+	local picked
+	if [[ -z "$kws" ]]; then
+		picked="$(pick_keyword)"
+		kws="$picked"
+		log INFO "keywords: $kws"
+		((quiet)) || notify INFO "keywords: $kws"
 	fi
+	kws="${kws// /+}"
 }
 
-datm() {
-	date '+%F %T'
-}
-
-ep_sec() {
-	date '+%s'
-}
-
-msg() {
-	# print non-script output: errs/logs/messages
-	printf "[%s] [%s] %s\n" "$(datm)" "${1}" "${2-}" >&2
-}
-
-#rand()( {
-#	local -n intarr=${1}
-#	RANDOM=$$$(date +%s)
-#	echo "$(${intarr[ $RANDOM % ${#intarr[@]} ]})"
-#}
-
-subject() {
-	words=( \
-		"tech+technology" \
-		"vintage+tech" \
-		"german+shepherd" \
-		"husky+huskies" \
-		"wolf+wolves" \
-		"dog+dogs" \
-		"circuit+circuitry" \
-		"electronic+electricity" \
-		"code" \
-		"test+pattern" \
-		"particles" \
-		"audio" \
-		"spectrum" \
-		"cogs+gears" \
-		"mechanism+machinery" \
-		"nightscape" \
-		"id:17952" \
-		"id:344" \
-		"@jrmnt" \
-		"#Fangpeii" \
-		"monochrome+nature" \
-		"map+globe" \
-		"id:81213" \
-		"@waneella" \
-		"@joejazz" \
-		"planets+stars+nebulae" \
-		"@userisro" \
-		"@pc7" \
-		"monochrome+wildlife" \
-		"national+parks" \
-		"landmark" \
-		"dystopia" \
-		"tolkien" \
-		"nikola+tesla" \
-		"physics+science" \
-		"@CartographerStorm" \
-		"Kvacm" \
-		"escher" \
-		"world+heritage" \
-		"Aenami" \
-	)
-
-	if [ -z "$keywords" ]; then
-		RANDOM=$$$(date +%s)
-		keywords="${words[ $RANDOM % ${#words[@]} ]}"
-		text="Keywords: $keywords"
-		msg "INFO" "$text"
-		notify "INFO" "$text"
+dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
+	subject
+	local url json n path
+	url="$(make_url)"
+	if ! json="$(curl "${curl_opts[@]}" --fail "$url")"; then
+		err "Wallhaven API failure (retry in ${interval}s)"
+		notify ERROR "Wallhaven API failure"
+		return 1
 	fi
-	keywords=$(echo $keywords | tr " " "+" | sed 's/+$//')
-}
-
-wh_images() {
-	while :; do
-		subject
-		main
-		get_images
-		dl_wallpaper
-		gen_blur
-		add_quote
-		set_wallpaper
-		sleep "$interval" &
-		wait $!
-	done
-}
-
-dir_images() {
-	if [ -d "$walldir" ]; then
-		while :; do
-			shopt -s nullglob
-			walls=($walldir/*.{png,jpg,jpeg,gif})
-			shopt -u nullglob
-			RANDOM=$$$(date +%s)
-			wallnum=$(($RANDOM % (${#walls[@]} - 2 + 1) + 0))
-			cp "${walls[$wallnum]}" "$WALLPAPER"
-			gen_blur
-			add_quote
-			set_wallpaper
-			sleep "$interval" &
-			wait $!
-		done
-	else
-		text="Directory not found!"
-		msg "ERROR" "$text"
+	if ! jq -e . >/dev/null 2>&1 <<<"$json"; then
+		err "Invalid API response (retry in ${interval}s)"
+		notify ERROR "Invalid API response"
+		return 1
 	fi
-}
-
-file_image() {
-	if [ -f "$wallfile" ]; then
-		cp "$wallfile" "$WALLPAPER"
-		add_quote
-		set_wallpaper
-		text="Wallpaper: $WALLPAPER"
-		msg "INFO" "$text"
-		notify "INFO" "$text"
-	else
-		text="$WALLPAPER does not exist!"
-		msg "ERROR" "$text"
-		notify "ERROR" "$text"
-		exit 1
+	n="$(jq -r '.data | length' <<<"$json")" || return 1
+	if [[ "$n" -eq 0 ]]; then
+		err "No results; taking new keywords"
+		notify ERROR "No results"
+		kws=
+		return 1
 	fi
-}
-
-picker() {
-	if [ -d "$walldir" ]; then
-		wallfile="$(ls $walldir | rofi -dmenu)"
-		wallfile="$walldir/$wallfile"
-		file_image
-	else
-		text="$walldir does not exist!"
-		msg "ERROR" "$text"
-		notify "ERROR" "$text"
-		exit 1
+	path="$(jq -r --argjson i "$((RANDOM % n))" '.data[$i].path' <<<"$json")" || return 1
+	[[ -n "$path" && "$path" != null ]] || {
+		err "No usable path in response"
+		return 1
+	}
+	if ! curl "${curl_opts[@]}" --fail "$path" -o "$WALLPAPER"; then
+		err "Download failed (retry in ${interval}s)"
+		notify ERROR "Download failed"
+		return 1
 	fi
+	[[ -s "$WALLPAPER" ]] || {
+		err "Empty download"
+		return 1
+	}
+	cp "$WALLPAPER" "$WALLPAPER_ORIG"
+	cur_src="$path"
+	log INFO "Wallpaper: $path"
+	((quiet)) || notify INFO "Wallpaper: $path"
 }
 
-get_images() {
-	API_URL="${api}apikey=${key}&q=${keywords}&categories=${categories}&purity=${purity}&atleast=1920x1080&ratios=${ratios}&sorting=${sorting}"
-	API_CURL=$(curl ${curl_opts[@]} $API_URL)
-	#echo $API_URL
+quote_overlay() { # overlay a fortune quote when -q is given
+	[[ "$quots" -ne 1 ]] && return 0
+	chk_dep fortune || return 0
+	local quote
+	local -a font_arg=()
+	quote="$(fortune -e "$HOME/.local/share/fortune/my-collected-quotes" 2>/dev/null |
+		fold -s -w 60 | sed 's/--/—/')" || true
+	[[ -z "$quote" ]] && return 0
+	[[ -f "$quote_font" ]] && font_arg=(-font "$quote_font")
+	# crop-resize to the target geometry, then draw shadowed text
+	magick "$WALLPAPER" -resize 1920x1080^ "${magick_extend_opts[@]}" "$WALLPAPER"
+	magick "$WALLPAPER" "${font_arg[@]}" \
+		-gravity North -pointsize 32 -fill black -annotate "+0+100" "$quote" \
+		-gravity North -pointsize 32 -fill gray70 -annotate "+2+102" "$quote" \
+		"$WALLPAPER"
 }
 
-gen_blur() {
-	blurred="$TMPDIR/blurred_wallpaper.png"
-	blur="20x12"
-	magick "$WALLPAPER" -resize 75% "$blurred"
-	if [ "$blur" != "0x0" ]; then
-		magick "$blurred" -blur "$blur" "$blurred"
+set_bg() { # apply the wallpaper via noctalia (if running) and/or awww
+	local epoch
+	if chk_noct; then
+		epoch="$(date +%s)"
+		cp "$WALLPAPER" "$TMP/wallpaper.$epoch"
+		noctalia msg wallpaper-set "$TMP/wallpaper.$epoch"
+		sleep 1
+		rm -f "$TMP/wallpaper.$epoch"
 	fi
-}
-
-resize_wall() {
-	magick "$WALLPAPER" "${magick_resize_opts[@]}" "$WALLPAPER"
-}
-
-add_quote() {
-	if [ "$quots" -eq 1 ]; then
-		# <https://github.com/Cybersnake223/Hypr/blob/main/.local/bin/scripts/changewall>
-		cols=60
-		font=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
-		font_size=32
-		font_color=lightgray
-		shad_color=black
-		quote=$(fortune -e ~/.local/share/fortune/my-collected-quotes | fold -s -w $cols | sed 's/--/—/')
-		resize_wall
-		magick \
-			"$WALLPAPER" \
-			-gravity North \
-			-font "$font" \
-			-pointsize "$font_size" \
-			-fill "$shad_color" \
-			-annotate +0+100 "$quote" \
-			-fill "$font_color" \
-			-annotate +2+102 "$quote" \
-			"$WALLPAPER"
-	else
-		return
-	fi
-}
-
-awww_set() {
-	awww img "$WALLPAPER" "${awww_opts[@]}"
-}
-
-noctalia_set() {
-	epoch="$(ep_sec)"
-	cp "$WALLPAPER" "$TMPDIR/wallpaper_$epoch"
-	#qs -c noctalia-shell ipc call wallpaper set $TMPDIR/wallpaper_$epoch all
-  noctalia msg wallpaper-set $TMPDIR/wallpaper_$epoch
-	sleep 1
-	rm "$TMPDIR/wallpaper_$epoch"
-}
-
-set_wallpaper() {
 	if chk_dep awww; then
-		awww_set
-	fi
-	if chk_noctalia; then
-		noctalia_set
+		awww img "$WALLPAPER" "${awww_opts[@]}"
 	fi
 }
 
-main() {
-	if get_images; then
-		if [[ $API_CURL == *"path"* ]]; then  # if results contain full path url
-			if hash jq > /dev/null 2>&1 ; then  # then decide which function to define
-				dl_wallpaper() {
-					entries=$(echo $API_CURL | jq -r '[.data[] | .path]' | wc -l)
-					if [ "$entries" -lt 2 ]; then
-						subject
-						return
-					fi
-					RANDOM=$$$(date +%s)
-					entry=$(($RANDOM % ($entries - 2 + 1) + 0))
-					IMAGE_URL=$(echo "$API_CURL" | jq -r "[.data[] | .path] | .[$entry]")
-					FILE="$(echo ${IMAGE_URL##*/})"
-					text="Wallpaper: $IMAGE_URL"
-					msg "INFO" "$text"
-					curl -sS --max-time 10 --retry 2 --retry-delay 3 --retry-max-time 20 "$IMAGE_URL" -o "$WALLPAPER" #"$HOME/.cache/wallpaper.${IMAGE_URL##*.}"
-					cp "$WALLPAPER" "$WALLPAPER.ORG"
-				}
-			else
-				dl_wallpaper() {
-					trim="${API_CURL##*path}"
-					echo "$trim" | cut -c 4-59 | xargs curl -sS --max-time 10 --retry 2 --retry-delay 3 --retry-max-time 20 -o "$WALLPAPER" #"$HOME/.cache/wallpaper.${IMAGE_URL##*.}"
-				}
-			fi
-		else
-			# if $API_CURL does not return at least one full path url
-			text="No results - Fetching new keywords!"
-			msg "ERROR" "$text"
-			notify "ERROR" "$text"
-			keywords=
-			wh_images
-		fi
+dir_wall() { # dir mode: rotate through a directory
+	shopt -s nullglob
+	local -a files=("$WALLDIR"/*.{png,jpg,jpeg,gif,PNG,JPG,JPEG,GIF})
+	shopt -u nullglob
+	[[ ${#files[@]} -gt 0 ]] || {
+		err "No images in $WALLDIR"
+		return 1
+	}
+	local chosen="${files[$((RANDOM % ${#files[@]}))]}"
+	cp "$chosen" "$WALLPAPER"
+	cp "$chosen" "$WALLPAPER_ORIG"
+	cur_src="$chosen"
+	log INFO "Wallpaper: $chosen"
+}
+
+pick_wall() { # pick mode: rofi chooser, then set the image
+	[[ -d "$WALLDIR" ]] || {
+		err "$WALLDIR does not exist"
+		notify ERROR "$WALLDIR does not exist"
+		return 1
+	}
+	local base sel
+	base="$(find "$WALLDIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \) \
+		-printf '%f\n' | sort | rofi -dmenu)" || return 1
+	[[ -n "$base" ]] || return 1
+	sel="$WALLDIR/$base"
+	cp "$sel" "$WALLPAPER"
+	cp "$sel" "$WALLPAPER_ORIG"
+	cur_src="$sel"
+	log INFO "Wallpaper: $sel"
+}
+
+file_wall() { # file mode: set a single image once
+	cp "$wallfile" "$WALLPAPER"
+	cp "$wallfile" "$WALLPAPER_ORIG"
+	cur_src="$wallfile"
+	log INFO "Wallpaper: $wallfile"
+	((quiet)) || notify INFO "Wallpaper: $wallfile"
+}
+
+save_current() { # SIGRTMAX: copy the live wallpaper into the wallpaper dir
+	[[ -s "$WALLPAPER_ORIG" ]] || {
+		err "Nothing to save"
+		return 1
+	}
+	mkdir -p "$WALLDIR"
+	local name
+	if [[ -n "$cur_src" ]]; then
+		name="$(basename "$cur_src")"
 	else
-		text="Wallhaven API failure: retry in $interval seconds."
-		msg "ERROR" "$text"
-		notify "ERROR" "$text"
-		sleep "$interval" &
-		wait $!
+		name=wall
 	fi
+	local base="${name%.*}" ext="${name##*.}" n=1
+	[[ "$ext" == "$name" ]] && ext=png # no extension in source name
+	while [[ -e "$WALLDIR/$name" ]]; do
+		name="${base}.$((n++)).$ext"
+	done
+	cp "$WALLPAPER_ORIG" "$WALLDIR/$name"
+	log INFO "saved $WALLDIR/$name"
+	notify INFO "Wallpaper saved: $name"
 }
 
-# next wallpaper
-handle_usr1() {
-	if [ "$mode" == "dir" ]; then
-		dir_images
-	elif [ "$mode" == "pick" ]; then
-		picker
-	else
-		wh_images
-	fi
-}
-
-# new keywords
-handle_usr2() {
-	if [ "$mode" == "dir" ]; then
-		dir_images
-	else
-		keywords=
-		wh_images
-	fi
-}
-
-# notify current keywords
-handle_rtmin() {
-	if [ "$mode" == "dir" ] || [ "$mode" == "pick" ]; then
-		notify "ERROR" "Keywords not applicable in $mode mode."
-	else
-		notify "INFO" "Keywords: $keywords"
-	fi
-	sleep "$interval" &
-	wait $!
-}
-
-# save current wallpaper
-handle_rtmax() {
-	if ! [ -d "$walldir" ]; then
-		mkdir "$walldir"
-	fi
-	cp "$WALLPAPER.ORG" "$walldir/$FILE"
-	notify "INFO" "Wallpaper: $FILE saved!"
-	sleep "$interval" &
-	wait $!
+cycle() { # one wallpaper cycle for non-file modes
+	case "$mode" in
+	dir) dir_wall ;;
+	pick) pick_wall ;;
+	*) dl_wallpaper ;;
+	esac
+	quote_overlay
+	set_bg
 }
 
 ########################################
-# Script
+# Signal handling: traps poke the sleep so the loop wakes early
 ########################################
 
-if ! [ -d "$TMPDIR" ]; then
-	mkdir "$TMPDIR"
-fi
+sleep_pid=
+want_next=0
+want_kw=0
+need_save=0
+quiet=0
 
-# pidfile
-if [[ -f "$PIDFILE" && $(pgrep $(cat $PIDFILE)) ]]; then
-	kill -TERM "$(cat $PIDFILE)"
-	rm "$PIDFILE"
-fi
-echo $$ >"$PIDFILE"
+poke() {
+	[[ -n "$sleep_pid" ]] && kill "$sleep_pid" 2>/dev/null
+	return 0
+}
 
-trap handle_usr1 SIGUSR1
-trap handle_usr2 SIGUSR2
-trap handle_rtmin SIGRTMIN
-trap handle_rtmax SIGRTMAX
+on_usr1() { # SIGUSR1: fetch next wallpaper, no notify
+	want_next=1
+	poke
+}
+on_usr2() { # SIGUSR2: new keywords + next wallpaper; notify only keywords
+	want_kw=1
+	poke
+}
+on_rtmin() { # SIGRTMIN: report current keywords, never fetch
+	notify INFO "keywords: ${kws:-<dir/pick mode>}"
+}
+on_rtmax() { # SIGRTMAX: save current wallpaper + notify; never change wallpaper
+	need_save=1
+	poke
+}
+on_hup() { on_usr1; }
+
+cleanup() {
+	[[ -n "$sleep_pid" ]] && kill "$sleep_pid" 2>/dev/null
+	rm -f "$PIDFILE"
+}
+trap cleanup EXIT
+trap on_usr1 SIGUSR1
+trap on_usr2 SIGUSR2
+trap on_rtmin SIGRTMIN
+trap on_rtmax SIGRTMAX
+trap on_hup SIGHUP
+
+########################################
+# Bootstrap
+########################################
 
 script="$(basename "${BASH_SOURCE[0]:-$0}")"
 
-deps=( curl magick jq )
-for dep in "${deps[@]}"; do
-	if ! chk_dep "$dep"; then
-		text="$script depends on $dep"
-		msg "ERROR" "$text"
+for dep in curl magick jq; do
+	chk_dep "$dep" || {
+		err "$script depends on $dep"
 		exit 1
-	fi
+	}
 done
+if [[ "$mode" == pick ]]; then
+	chk_dep rofi || {
+		err "$script needs rofi for -p"
+		exit 1
+	}
+fi
 
-interval=300
-mode=
-keywords=
-key=
-quots=0
+mkdir -p "$TMP" "$WALLDIR" 2>/dev/null
+if [[ -f "$PIDFILE" ]]; then
+	old_pid="$(<"$PIDFILE")"
+	if kill -0 "$old_pid" 2>/dev/null; then
+		kill -TERM "$old_pid" 2>/dev/null
+	fi
+	rm -f "$PIDFILE"
+fi
+printf '%s\n' "$$" >"$PIDFILE"
 
-OPTERR=0	# same as leading : in opts???
+OPTERR=0
 while getopts ":huva:d:f:i:k:qp:" option; do
-	case $option in
-		h|u )	usage
-				exit
-				;;
-		v )		version
-				exit
-				;;
-		a )		key="$OPTARG"
-				;;
-		d )		mode=dir
-				walldir="$OPTARG"
-				;;
-		f )		mode=file
-				wallfile="$OPTARG"
-				;;
-		i )		if [ "$OPTARG" -lt 60 ]; then
-					interval=60
-				else
-					interval="$OPTARG"
-				fi
-				;;
-		k )		mode=wh
-				keywords+="$OPTARG+"
-				;;
-		p )		mode=pick
-				walldir="$OPTARG"
-				;;
-		q )		quots=1
-				;;
-		* )		msg "ERROR" "Invalid option \"-$OPTARG\"!"
-				usage
-				exit 1
-				;;
+	case "$option" in
+	h | u)
+		usage
+		exit 0
+		;;
+	v)
+		version
+		exit 0
+		;;
+	a) key="$OPTARG" ;;
+	d)
+		mode=dir
+		WALLDIR="$OPTARG"
+		;;
+	f)
+		mode="file"
+		wallfile="$OPTARG"
+		;;
+	i) interval=$((OPTARG < 60 ? 60 : OPTARG)) ;;
+	k)
+		mode=k
+		kws+="+${OPTARG}"
+		;;
+	p)
+		mode=pick
+		WALLDIR="$OPTARG"
+		;;
+	q) quots=1 ;;
+	?)
+		err "Invalid option: -$OPTARG"
+		usage
+		exit 1
+		;;
 	esac
 done
 
-if [ "$mode" == "dir" ]; then
-	sleep 10
-	dir_images
-elif [ "$mode" == "file" ]; then
-	file_image
-elif [ "$mode" == "pick" ]; then
-	picker
-	#sleep infinity	# blocks -SIGUSR
-	sleep infinity &
-	wait $!
-elif [ "$mode" == "wh" ]; then
-	sleep 10
-	wh_images
-else
-	sleep 10
-	wh_images
+[[ -n "${key:-}" ]] && WHAVEN_API_KEY="$key"
+# tidy '+' accumulation from repeated -k and space-separated lists
+kws="${kws#+}"
+[[ -n "$kws" ]] && kws="${kws// /+}"
+
+if [[ "$mode" == file ]]; then
+	[[ -f "$wallfile" ]] || {
+		err "$wallfile does not exist"
+		exit 1
+	}
+	file_wall
+	quote_overlay
+	set_bg
+	exit 0
 fi
 
-exit 0
+if [[ "$mode" == pick ]]; then
+	pick_wall || exit 1
+	quote_overlay
+	set_bg
+	while :; do
+		sleep "$interval" &
+		sleep_pid=$!
+		wait "$sleep_pid"
+		sleep_pid=
+		if ((need_save)); then
+			need_save=0
+			save_current
+		elif ((want_next)); then
+			want_next=0
+			quiet=1
+			pick_wall && {
+				quote_overlay
+				set_bg
+			}
+			quiet=0
+		fi
+	done
+fi
+
+# dir and keyword modes share the same loop
+# initial wallpaper immediately, then sleep-then-cycle for autorotation
+case "$mode" in
+dir) dir_wall ;;
+*) dl_wallpaper ;;
+esac
+quote_overlay
+set_bg
+while :; do
+	sleep "$interval" &
+	sleep_pid=$!
+	wait "$sleep_pid"
+	wait_status=$?
+	sleep_pid=
+
+	# A poke (signal) interrupts the sleep, making wait return nonzero.
+	# Then only deferred signal actions run -- never an unsolicited cycle.
+	if ((need_save)); then
+		need_save=0
+		save_current
+	fi
+	if ((want_kw)); then
+		want_kw=0
+		kws=
+		subject # notifies the new keywords
+		quiet=1
+		cycle # silent fetch
+		quiet=0
+	fi
+	if ((want_next)); then
+		want_next=0
+		quiet=1
+		cycle # silent fetch
+		quiet=0
+	fi
+
+	# timer finished normally: set wallpaper (notifies)
+	if ((wait_status == 0)); then
+		cycle
+	fi
+done
