@@ -244,7 +244,6 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 	cp "$WALLPAPER" "$WALLPAPER_ORIG"
 	cur_src="$path"
 	log INFO "Wallpaper: $path"
-	((quiet)) || notify INFO "Wallpaper changed"
 }
 
 fetch_themed() { # dl_wallpaper + retry-on-theme-mismatch (wh mode only)
@@ -257,7 +256,6 @@ fetch_themed() { # dl_wallpaper + retry-on-theme-mismatch (wh mode only)
 	done
 	# no luck after N attempts: rotate keywords (same as SIGUSR2) and try again
 	log INFO "theme $theme not found in ${theme_retries} attempts; rotating keywords"
-	notify INFO "No ${theme} wallpaper found; rotating keywords"
 	kws=
 	subject # picks + notifies the new keywords
 	dl_wallpaper
@@ -336,7 +334,6 @@ file_wall() { # file mode: set a single image once
 	cp "$wallfile" "$WALLPAPER_ORIG"
 	cur_src="$wallfile"
 	log INFO "Wallpaper: $wallfile"
-	((quiet)) || notify INFO "Wallpaper changed"
 }
 
 save_current() { # SIGRTMAX: copy the live wallpaper into the wallpaper dir
