@@ -244,7 +244,7 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 	cp "$WALLPAPER" "$WALLPAPER_ORIG"
 	cur_src="$path"
 	log INFO "Wallpaper: $path"
-	((quiet)) || notify INFO "Wallpaper: $path"
+	((quiet)) || notify INFO "Wallpaper changed"
 }
 
 fetch_themed() { # dl_wallpaper + retry-on-theme-mismatch (wh mode only)
@@ -336,7 +336,7 @@ file_wall() { # file mode: set a single image once
 	cp "$wallfile" "$WALLPAPER_ORIG"
 	cur_src="$wallfile"
 	log INFO "Wallpaper: $wallfile"
-	((quiet)) || notify INFO "Wallpaper: $wallfile"
+	((quiet)) || notify INFO "Wallpaper changed"
 }
 
 save_current() { # SIGRTMAX: copy the live wallpaper into the wallpaper dir
