@@ -84,7 +84,7 @@ theme_retries=5
 quote_font="$HOME/.local/share/fonts/TTF/Fuzzy_Bubbles/FuzzyBubbles-Bold.ttf"
 quote_font_fallback=/usr/share/fonts/OTF/SpaceGrotesk-SemiBold.otf
 
-curl_opts=(-sS --connect-timeout 5 --max-time 10 --retry 3 --retry-delay 3 --retry-max-time 20)
+curl_opts=(-sS --connect-timeout 5 --max-time 10 --retry 5 --retry-delay 3 --retry-max-time 20)
 
 magick_extend_opts=(-background "#000000" -gravity center -extent 1920x1080)
 
