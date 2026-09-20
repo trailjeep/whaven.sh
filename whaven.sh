@@ -90,7 +90,6 @@ magick_extend_opts=(-background "#000000" -gravity center -extent 1920x1080)
 
 awww_opts=(
 	--all
-	--outputs "HDMI-A-1,HDMI-A-2"
 	--resize fit
 	--transition-bezier ".54,0,.34,.99"
 	--transition-fps 60
