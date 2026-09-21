@@ -44,6 +44,11 @@ Signals: `SIGUSR1` next wallpaper, `SIGUSR2` new keywords + wall,
 
 API key: `-a KEY`, or `WHAVEN_API_KEY`, or `~/.creds/wallhaven`.
 
+Outage resilience: when wallhaven's API is down, the first failure
+notifies once, then the daemon backs off up to 7x the interval (capped
+~35 min at default interval) until a request succeeds; no repeated
+notification spam.
+
 Paths: `WHAVEN_CACHE_DIR`, `WHAVEN_WALLPAPER_DIR` (XDG defaults otherwise).
 
 ### Change log
