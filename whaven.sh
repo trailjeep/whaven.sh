@@ -121,6 +121,12 @@ now() { date '+%F %T'; }
 log() { printf '[%s] [%s] %s\n' "$(now)" "$1" "${2:-}" >&2; }
 err() { log ERROR "$*"; }
 
+api_fail() { # record an API/transport failure; notify only the first of a streak
+	((api_fails++))
+	err "$1"
+	((api_fails == 1)) && notify ERROR "$1"
+}
+
 chk_dep() { command -v "$1" >/dev/null 2>&1; }
 chk_noct() { pgrep -x noctalia >/dev/null 2>&1; }
 
@@ -205,13 +211,11 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 	local url json n path
 	url="$(make_url)"
 	if ! json="$(curl "${curl_opts[@]}" --fail "$url")"; then
-		err "Wallhaven API failure (retry in ${interval}s)"
-		notify ERROR "Wallhaven API failure"
+		api_fail "Wallhaven API failure"
 		return 1
 	fi
 	if ! jq -e . >/dev/null 2>&1 <<<"$json"; then
-		err "Invalid API response (retry in ${interval}s)"
-		notify ERROR "Invalid API response"
+		api_fail "Invalid API response"
 		return 1
 	fi
 	n="$(jq -r '.data | length' <<<"$json")" || return 1
@@ -227,8 +231,7 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 		return 1
 	}
 	if ! curl "${curl_opts[@]}" --fail "$path" -o "$WALLPAPER"; then
-		err "Download failed (retry in ${interval}s)"
-		notify ERROR "Download failed"
+		api_fail "Download failed"
 		return 1
 	fi
 	[[ -s "$WALLPAPER" ]] || {
@@ -240,6 +243,7 @@ dl_wallpaper() { # wh mode: pick a random wallhaven result and download it
 		err "Theme mismatch ($theme): refetching"
 		return 2 # dl_wallpaper retry sentinel
 	fi
+	api_fails=0
 	cp "$WALLPAPER" "$WALLPAPER_ORIG"
 	cur_src="$path"
 	log INFO "Wallpaper: $path"
@@ -376,6 +380,7 @@ want_next=0
 want_kw=0
 need_save=0
 quiet=0
+api_fails=0 # consecutive API failures; drives backoff + notify throttle
 
 poke() {
 	[[ -n "$sleep_pid" ]] && kill "$sleep_pid" 2>/dev/null
@@ -533,7 +538,13 @@ esac
 quote_overlay
 set_bg
 while :; do
-	sleep "$interval" &
+	# after API failures, stretch the wait so a down endpoint isn't hammered
+	if ((api_fails > 0)); then
+		gap=$((interval * (api_fails < 6 ? api_fails + 1 : 7)))
+	else
+		gap=$interval
+	fi
+	sleep "$gap" &
 	sleep_pid=$!
 	wait "$sleep_pid"
 	wait_status=$?
